@@ -48,6 +48,13 @@ const DEFAULT_CATEGORIES = [
 const EMOJIS = ['🍽️', '🍔', '☕', '🍺', '🛒', '🚌', '🚕', '🚗', '⛽', '🅿️', '🏠', '💡', '💧', '📶', '📱', '💊', '🏥', '🦷', '🏋️', '📚', '🎓', '💻', '🎬', '🎮', '🎵', '👕', '👟', '💇', '🧴', '💳', '🏦', '🐾', '👶', '🎁', '✈️', '🏖️', '🔧', '💼', '⛪', '🏷️'];
 const COLORS = ['#ef4444', '#f97316', '#eab308', '#65a30d', '#16a34a', '#14b8a6', '#06b6d4', '#0ea5e9', '#6366f1', '#8b5cf6', '#a855f7', '#d946ef', '#ec4899', '#f43f5e', '#a16207', '#64748b'];
 
+const defaultQuick = () => [
+  { label: 'Menú', amount: 15, categoryId: 'comida' },
+  { label: 'Pasaje', amount: 3.5, categoryId: 'transporte' },
+  { label: 'Café', amount: 8, categoryId: 'comida' },
+  { label: 'Taxi', amount: 0, categoryId: 'transporte' },  // 0 = monto libre
+].map(q => ({ id: uid(), currency: 'PEN', method: 'Efectivo', uses: 0, ...q }));
+
 function defaultState() {
   return {
     version: 1,
@@ -56,6 +63,7 @@ function defaultState() {
     expenses: [],
     incomes: [],
     recurring: [],
+    quick: defaultQuick(),
   };
 }
 function normalize(s) {
@@ -64,6 +72,7 @@ function normalize(s) {
   s.settings = { ...d.settings, ...(s.settings || {}) };
   for (const k of ['categories', 'expenses', 'incomes', 'recurring']) if (!Array.isArray(s[k])) s[k] = d[k];
   if (!Array.isArray(s.settings.salaries)) s.settings.salaries = [];
+  if (!Array.isArray(s.quick)) s.quick = defaultQuick();
   if (!s.categories.some(c => c.id === 'otros')) s.categories.push({ ...DEFAULT_CATEGORIES.at(-1), budget: 0 });
   return s;
 }
@@ -185,6 +194,41 @@ function generateRecurring() {
   return changed;
 }
 
+// ---------- Registro rápido ----------
+function quickChips() {
+  const list = [...state.quick].sort((a, b) => (b.uses || 0) - (a.uses || 0));
+  return `<div class="quick">${list.map(q => {
+    const c = catById(q.categoryId);
+    return `<button type="button" class="quick-chip" data-quick="${q.id}"><span class="e">${esc(c.emoji)}</span>
+      <span><b>${esc(q.label)}</b><small>${q.amount > 0 ? fmt(q.amount, q.currency) : 'monto libre'}</small></span></button>`;
+  }).join('')}<button type="button" class="quick-chip add" data-quick-new>＋ Atajo</button></div>`;
+}
+
+function useQuick(id) {
+  const q = state.quick.find(x => x.id === id); if (!q) return;
+  q.uses = (q.uses || 0) + 1;
+  if (!(q.amount > 0)) {   // monto libre: abre el formulario ya llenado, solo falta el monto
+    save(); closeSheet();
+    openExpenseForm({ preset: { categoryId: q.categoryId, method: q.method, note: q.label, currency: q.currency, date: todayISO() } });
+    return;
+  }
+  const exp = { id: uid(), createdAt: Date.now(), amount: q.amount, currency: q.currency, categoryId: q.categoryId, method: q.method, note: q.label, date: todayISO() };
+  state.expenses.push(exp);
+  save(); closeSheet(); viewMonth = currentMonth(); render();
+  navigator.vibrate?.(15);
+  toast(`${q.label} · ${fmt(q.amount, q.currency)} registrado ✓`, {
+    label: 'Deshacer',
+    fn: () => { state.expenses = state.expenses.filter(e => e !== exp); q.uses = Math.max(0, q.uses - 1); save(); render(); toast('Registro deshecho'); },
+  });
+}
+
+function handleQuickClick(ev) {
+  const b = ev.target.closest('[data-quick],[data-quick-new]'); if (!b) return false;
+  if (b.hasAttribute('data-quick-new')) { closeSheet(); openQuickForm(); }
+  else useQuick(b.dataset.quick);
+  return true;
+}
+
 // =========================================================
 // Vistas
 // =========================================================
@@ -215,6 +259,8 @@ function viewSummary() {
   if (state.expenses.length >= 15 && (!lb || Date.now() - lb > 30 * 864e5)) {
     html += `<div class="banner" data-action="backup">💾 ${lb ? 'Hace más de un mes que no haces' : 'Aún no has hecho'} un respaldo. Toca aquí para crearlo.</div>`;
   }
+
+  html += `<section class="card"><div class="card-head"><h3>⚡ Registro rápido</h3><button class="link" data-action="goto-quick">Editar</button></div>${quickChips()}</section>`;
 
   let delta = '';
   if (prevTotal > 0) {
@@ -470,6 +516,20 @@ function viewSettings() {
     <p class="muted small" style="margin-top:-6px">Los presupuestos de cada categoría se configuran en la pestaña Categorías.</p>
   </section>
 
+  <section class="card" id="quickSettings">
+    <h3>Registro rápido ⚡</h3>
+    <p class="muted small" style="margin-top:-6px">Botones para registrar tus gastos frecuentes con un toque. Si dejas el monto vacío, se abre el formulario para escribirlo.</p>
+    <ul class="cat-list">${state.quick.map(q => {
+      const c = catById(q.categoryId);
+      return `<li><button class="cat-row" data-action="quick-edit" data-id="${q.id}">
+        <span class="cat-ico" style="background:${c.color}26">${esc(c.emoji)}</span>
+        <span class="cat-info"><span class="top"><span class="name">${esc(q.label)}</span><b>${q.amount > 0 ? fmt(q.amount, q.currency) : 'Monto libre'}</b></span>
+        <span class="sub">${esc(c.name)} · ${esc(q.method)} · usado ${q.uses || 0} ${q.uses === 1 ? 'vez' : 'veces'}</span></span>
+        <span class="chev">›</span></button></li>`;
+    }).join('')}</ul>
+    <button class="btn block" data-action="quick-add">＋ Nuevo atajo</button>
+  </section>
+
   <section class="card">
     <h3>Gastos fijos 🔁</h3>
     ${rec.length ? rec.map(r => {
@@ -511,7 +571,7 @@ function openSheet(html, onSubmit) {
   sheetEl.hidden = false;
 }
 function closeSheet() { sheetEl.hidden = true; sheetSubmit = null; }
-sheetEl.addEventListener('click', e => { if (e.target === sheetEl || e.target.closest('[data-close]')) closeSheet(); });
+sheetEl.addEventListener('click', e => { if (handleQuickClick(e)) return; if (e.target === sheetEl || e.target.closest('[data-close]')) closeSheet(); });
 sheetEl.addEventListener('submit', e => { e.preventDefault(); sheetSubmit?.(); });
 
 function categoryPicker(selected) {
@@ -521,14 +581,37 @@ function categoryPicker(selected) {
   </div>`;
 }
 
+// Selector de categorías (con opción de crear una nueva al vuelo)
+function bindCatPicker(sheet, onSelect) {
+  const handler = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.hasAttribute('data-newcat')) {
+      const name = (prompt('Nombre de la nueva categoría') || '').trim();
+      if (!name) return;
+      if (state.categories.some(c => norm(c.name) === norm(name))) { toast('Esa categoría ya existe'); return; }
+      const c = { id: uid(), name, emoji: '🏷️', color: COLORS[state.categories.length % COLORS.length], budget: 0 };
+      state.categories.push(c); save();
+      onSelect(c.id);
+      sheet.querySelector('#fCats').outerHTML = categoryPicker(c.id);
+      sheet.querySelector('#fCats').addEventListener('click', handler);
+      toast('Categoría creada (puedes cambiarle el ícono en Categorías)');
+      return;
+    }
+    onSelect(b.dataset.cat);
+    sheet.querySelectorAll('#fCats .cat-pick').forEach(x => x.classList.toggle('on', x === b));
+  };
+  sheet.querySelector('#fCats').addEventListener('click', handler);
+}
+
 // ----- Gasto / gasto fijo -----
-function openExpenseForm({ mode = 'expense', item = null } = {}) {
+function openExpenseForm({ mode = 'expense', item = null, preset = null } = {}) {
   const isRec = mode === 'recurring';
   const defDate = todayISO();
   const d = item || {
     amount: '', currency: last.currency || mainCur(),
     categoryId: last.categoryId || state.categories[0]?.id, method: last.method || METHODS[0],
     note: '', date: defDate, day: new Date().getDate(),
+    ...(preset || {}),
   };
   let cur = d.currency, cat = d.categoryId;
   const methods = METHODS.includes(d.method) ? METHODS : [...METHODS, d.method];
@@ -537,6 +620,7 @@ function openExpenseForm({ mode = 'expense', item = null } = {}) {
   openSheet(`<form autocomplete="off">
     <div class="sheet-head"><h3>${title}</h3><button type="button" data-close>Cancelar</button></div>
     ${!isRec && item?.recurringId ? '<div class="note">🔁 Generado por un gasto fijo. Editarlo solo cambia este registro.</div>' : ''}
+    ${!isRec && !item && !preset ? `<div class="quick-in-form">${quickChips()}</div>` : ''}
     <div class="amount-row">
       <div class="seg" id="fCur">${Object.keys(CURRENCIES).map(k => `<button type="button" data-cur="${k}" class="${k === cur ? 'on' : ''}">${k === 'PEN' ? 'S/' : 'US$'}</button>`).join('')}</div>
       <input id="fAmount" type="text" inputmode="decimal" placeholder="0.00" value="${d.amount !== '' ? d.amount : ''}" required>
@@ -550,7 +634,8 @@ function openExpenseForm({ mode = 'expense', item = null } = {}) {
       <label class="field">Método<select id="fMethod">${methods.map(m => `<option ${m === d.method ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></label>
     </div>
     <label class="field">Nota (opcional)<input id="fNote" type="text" maxlength="80" placeholder="Ej. Almuerzo con el equipo" value="${esc(d.note)}"></label>
-    ${!isRec && !item ? '<label class="check"><input type="checkbox" id="fRecurring"> Repetir cada mes (gasto fijo)</label>' : ''}
+    ${!isRec && !item ? `<label class="check"><input type="checkbox" id="fRecurring"> Repetir cada mes (gasto fijo)</label>
+      ${!preset ? '<label class="check"><input type="checkbox" id="fQuick"> Guardar como atajo de registro rápido ⚡</label>' : ''}` : ''}
     <div class="sheet-actions">
       <button type="submit" class="btn primary">Guardar</button>
       ${item ? `<button type="button" class="btn danger" id="fDelete">${isRec ? 'Eliminar gasto fijo' : 'Eliminar gasto'}</button>` : ''}
@@ -580,7 +665,10 @@ function openExpenseForm({ mode = 'expense', item = null } = {}) {
           exp.recurringId = r.id;
         }
         state.expenses.push(exp);
-        toast(exp.recurringId ? 'Gasto fijo creado 🔁' : 'Gasto guardado ✓');
+        if ($('#fQuick')?.checked) {
+          state.quick.push({ id: uid(), label: data.note || catById(cat).name, amount, currency: cur, categoryId: cat, method: data.method, uses: 1 });
+        }
+        toast(exp.recurringId ? 'Gasto fijo creado 🔁' : $('#fQuick')?.checked ? 'Gasto y atajo guardados ⚡' : 'Gasto guardado ✓');
       }
       viewMonth = monthOf(data.date);
     }
@@ -595,24 +683,7 @@ function openExpenseForm({ mode = 'expense', item = null } = {}) {
     cur = b.dataset.cur;
     sheet.querySelectorAll('#fCur button').forEach(x => x.classList.toggle('on', x === b));
   });
-  const onCatClick = e => {
-    const b = e.target.closest('button'); if (!b) return;
-    if (b.hasAttribute('data-newcat')) {
-      const name = (prompt('Nombre de la nueva categoría') || '').trim();
-      if (!name) return;
-      if (state.categories.some(c => norm(c.name) === norm(name))) { toast('Esa categoría ya existe'); return; }
-      const c = { id: uid(), name, emoji: '🏷️', color: COLORS[state.categories.length % COLORS.length], budget: 0 };
-      state.categories.push(c); save();
-      cat = c.id;
-      sheet.querySelector('#fCats').outerHTML = categoryPicker(cat);
-      sheet.querySelector('#fCats').addEventListener('click', onCatClick);
-      toast('Categoría creada (puedes cambiarle el ícono en Categorías)');
-      return;
-    }
-    cat = b.dataset.cat;
-    sheet.querySelectorAll('#fCats .cat-pick').forEach(x => x.classList.toggle('on', x === b));
-  };
-  sheet.querySelector('#fCats').addEventListener('click', onCatClick);
+  bindCatPicker(sheet, id => { cat = id; });
   sheet.querySelector('#fDelete')?.addEventListener('click', () => {
     if (isRec) {
       if (!confirm('¿Eliminar este gasto fijo? Los gastos ya registrados se mantienen.')) return;
@@ -624,7 +695,50 @@ function openExpenseForm({ mode = 'expense', item = null } = {}) {
     }
     save(); closeSheet(); render(); toast('Eliminado');
   });
-  if (!item) setTimeout(() => $('#fAmount')?.focus(), 250);
+  if (!item) setTimeout(() => $('#fAmount')?.focus({ preventScroll: true }), 250);
+}
+
+// ----- Atajo de registro rápido -----
+function openQuickForm(item = null) {
+  let cur = item?.currency || last.currency || mainCur();
+  let cat = item?.categoryId || last.categoryId || state.categories[0]?.id;
+  const method = item?.method || last.method || METHODS[0];
+  const methods = METHODS.includes(method) ? METHODS : [...METHODS, method];
+  openSheet(`<form autocomplete="off">
+    <div class="sheet-head"><h3>${item ? 'Editar atajo' : 'Nuevo atajo ⚡'}</h3><button type="button" data-close>Cancelar</button></div>
+    <label class="field">Nombre<input id="qLabel" type="text" maxlength="24" required placeholder="Ej. Menú, Pasaje, Café" value="${esc(item?.label || '')}"></label>
+    <div class="amount-row">
+      <div class="seg" id="qCur">${Object.keys(CURRENCIES).map(k => `<button type="button" data-cur="${k}" class="${k === cur ? 'on' : ''}">${k === 'PEN' ? 'S/' : 'US$'}</button>`).join('')}</div>
+      <input id="qAmount" type="text" inputmode="decimal" placeholder="Monto libre" value="${item?.amount > 0 ? item.amount : ''}" style="font-size:26px">
+    </div>
+    <p class="muted small" style="margin-top:-8px">Déjalo vacío si el monto cambia cada vez (ej. taxi): el atajo abrirá el formulario para escribirlo.</p>
+    <label class="field" style="margin-bottom:6px">Categoría</label>
+    ${categoryPicker(cat)}
+    <label class="field">Método<select id="qMethod">${methods.map(m => `<option ${m === method ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></label>
+    <div class="sheet-actions">
+      <button type="submit" class="btn primary">Guardar</button>
+      ${item ? '<button type="button" class="btn danger" id="qDelete">Eliminar atajo</button>' : ''}
+    </div>
+  </form>`, () => {
+    const label = $('#qLabel').value.trim();
+    if (!label) { toast('Ponle un nombre al atajo'); return; }
+    const amount = parseAmount($('#qAmount').value);
+    const data = { label, amount: amount > 0 ? amount : 0, currency: cur, categoryId: cat, method: $('#qMethod').value };
+    if (item) Object.assign(item, data); else state.quick.push({ id: uid(), uses: 0, ...data });
+    save(); closeSheet(); render(); toast(item ? 'Atajo actualizado' : 'Atajo creado ⚡');
+  });
+  const sheet = sheetEl.querySelector('.sheet');
+  sheet.querySelector('#qCur').addEventListener('click', e => {
+    const b = e.target.closest('[data-cur]'); if (!b) return;
+    cur = b.dataset.cur; sheet.querySelectorAll('#qCur button').forEach(x => x.classList.toggle('on', x === b));
+  });
+  bindCatPicker(sheet, id => { cat = id; });
+  sheet.querySelector('#qDelete')?.addEventListener('click', () => {
+    if (!confirm(`¿Eliminar el atajo “${item.label}”? Los gastos ya registrados se mantienen.`)) return;
+    state.quick = state.quick.filter(q => q !== item);
+    save(); closeSheet(); render(); toast('Atajo eliminado');
+  });
+  if (!item) setTimeout(() => $('#qLabel')?.focus({ preventScroll: true }), 250);
 }
 
 // ----- Ingreso extra -----
@@ -662,7 +776,7 @@ function openIncomeForm(item = null) {
     state.incomes = state.incomes.filter(i => i !== item);
     save(); closeSheet(); render(); toast('Ingreso eliminado');
   });
-  if (!item) setTimeout(() => $('#iAmount')?.focus(), 250);
+  if (!item) setTimeout(() => $('#iAmount')?.focus({ preventScroll: true }), 250);
 }
 
 // ----- Categoría -----
@@ -781,6 +895,7 @@ function setCurrency(cur) {
 // Eventos globales
 // =========================================================
 $('#view').addEventListener('click', ev => {
+  if (handleQuickClick(ev)) return;
   const b = ev.target.closest('[data-action]'); if (!b) return;
   const { action, id } = b.dataset;
   switch (action) {
@@ -800,6 +915,9 @@ $('#view').addEventListener('click', ev => {
       break;
     }
     case 'add-income': openIncomeForm(); break;
+    case 'quick-add': openQuickForm(); break;
+    case 'quick-edit': openQuickForm(state.quick.find(q => q.id === id)); break;
+    case 'goto-quick': tab = 'ajustes'; render(); $('#quickSettings')?.scrollIntoView({ block: 'start' }); break;
     case 'edit-income': openIncomeForm(state.incomes.find(i => i.id === id)); break;
     case 'goto-settings': tab = 'ajustes'; render(); window.scrollTo(0, 0); break;
     case 'budget-mode': state.settings.budgetMode = b.dataset.mode; save(); render(); break;
@@ -870,9 +988,13 @@ $('#view').addEventListener('touchend', e => {
 }, { passive: true });
 
 let toastTimer;
-function toast(msg) {
-  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+function toast(msg, action) {
+  const t = $('#toast');
+  t.innerHTML = esc(msg) + (action ? ` <button class="toast-btn">${esc(action.label)}</button>` : '');
+  t.classList.toggle('has-action', !!action);
+  if (action) t.querySelector('.toast-btn').onclick = () => { t.classList.remove('show', 'has-action'); clearTimeout(toastTimer); action.fn(); };
+  t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show', 'has-action'), action ? 5000 : 2200);
 }
 
 // Al volver a la app (p. ej. al día siguiente) registra gastos fijos pendientes
