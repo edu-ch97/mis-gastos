@@ -5,6 +5,8 @@
    Los datos se guardan solo en este dispositivo (IndexedDB).
    ========================================================= */
 
+const APP_VERSION = 4;
+
 // ---------- Utilidades ----------
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -556,7 +558,12 @@ function viewSettings() {
       <button class="btn danger" data-action="wipe">🗑️ Borrar todos los datos</button>
     </div>
   </section>
-  <p class="muted small center">Mis Gastos · ${state.expenses.length} movimientos registrados</p>`;
+  <section class="card">
+    <h3>Actualizaciones</h3>
+    <p class="muted small" style="margin-top:-6px">Versión instalada: <b>${APP_VERSION}</b>. Si subiste una versión nueva a GitHub y no la ves, toca aquí. Tus datos no se borran.</p>
+    <button class="btn block" data-action="force-update">🔄 Buscar actualización</button>
+  </section>
+  <p class="muted small center">Mis Gastos v${APP_VERSION} · ${state.expenses.length} movimientos registrados</p>`;
 }
 
 // =========================================================
@@ -880,6 +887,17 @@ $('#importFile').addEventListener('change', async e => {
   } catch { toast('El archivo no es un respaldo válido'); }
 });
 
+// Borra solo la caché de la app (no tus datos) y recarga la última versión
+async function forceUpdate() {
+  toast('Buscando actualización…');
+  try {
+    const regs = (await navigator.serviceWorker?.getRegistrations?.()) || [];
+    await Promise.all(regs.map(r => r.unregister()));
+    if (window.caches) await Promise.all((await caches.keys()).map(k => caches.delete(k)));
+  } catch {}
+  location.replace(location.pathname + '?v=' + Date.now());
+}
+
 function setCurrency(cur) {
   const s = state.settings;
   if (cur === s.currency) return;
@@ -930,6 +948,7 @@ $('#view').addEventListener('click', ev => {
     case 'export-month': shareOrDownload(`gastos-${viewMonth}.csv`, csvFor(expensesOf(viewMonth)), 'text/csv'); break;
     case 'export-all': shareOrDownload(`gastos-completo-${todayISO()}.csv`, csvFor(state.expenses), 'text/csv'); break;
     case 'backup': doBackup(); break;
+    case 'force-update': forceUpdate(); break;
     case 'restore': $('#importFile').click(); break;
     case 'wipe':
       if (confirm('¿Borrar TODOS los gastos, categorías y ajustes? Esto no se puede deshacer.') && confirm('¿Seguro? Te recomendamos crear un respaldo antes.')) {
