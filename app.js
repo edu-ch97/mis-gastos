@@ -51,9 +51,10 @@ const COLORS = ['#ef4444', '#f97316', '#eab308', '#65a30d', '#16a34a', '#14b8a6'
 function defaultState() {
   return {
     version: 1,
-    settings: { currency: 'PEN', rate: 3.75, monthlyBudget: 0, lastBackup: null },
+    settings: { currency: 'PEN', rate: 3.75, monthlyBudget: 0, budgetMode: 'fixed', budgetPercent: 0, salaries: [], lastBackup: null },
     categories: DEFAULT_CATEGORIES.map(c => ({ ...c, budget: 0 })),
     expenses: [],
+    incomes: [],
     recurring: [],
   };
 }
@@ -61,7 +62,8 @@ function normalize(s) {
   const d = defaultState();
   s = { ...d, ...(s || {}) };
   s.settings = { ...d.settings, ...(s.settings || {}) };
-  for (const k of ['categories', 'expenses', 'recurring']) if (!Array.isArray(s[k])) s[k] = d[k];
+  for (const k of ['categories', 'expenses', 'incomes', 'recurring']) if (!Array.isArray(s[k])) s[k] = d[k];
+  if (!Array.isArray(s.settings.salaries)) s.settings.salaries = [];
   if (!s.categories.some(c => c.id === 'otros')) s.categories.push({ ...DEFAULT_CATEGORIES.at(-1), budget: 0 });
   return s;
 }
@@ -134,6 +136,31 @@ const expensesOf = mk => state.expenses.filter(e => monthOf(e.date) === mk);
 const totalOf = list => list.reduce((s, e) => s + toMain(e.amount, e.currency), 0);
 const pctClass = p => (p >= 100 ? 'over' : p >= 80 ? 'warn' : '');
 
+// ---------- Ingresos ----------
+// El sueldo guarda un historial: cada cambio aplica desde el mes en que se hizo,
+// así los meses anteriores conservan el sueldo que tenían.
+function salaryEntryFor(mk) {
+  let found = null;
+  for (const e of [...state.settings.salaries].sort((a, b) => a.from.localeCompare(b.from))) if (e.from <= mk) found = e;
+  return found;
+}
+const salaryFor = mk => { const e = salaryEntryFor(mk); return e ? toMain(e.amount, e.currency) : 0; };
+const incomesOf = mk => state.incomes.filter(i => monthOf(i.date) === mk);
+const incomeTotal = mk => salaryFor(mk) + totalOf(incomesOf(mk));
+function budgetFor(mk) {
+  const s = state.settings;
+  if (s.budgetMode === 'percent') return s.budgetPercent > 0 ? incomeTotal(mk) * s.budgetPercent / 100 : 0;
+  return s.monthlyBudget || 0;
+}
+function setSalary(amount, currency) {
+  const list = state.settings.salaries, cm = currentMonth();
+  const latest = [...list].sort((a, b) => a.from.localeCompare(b.from)).at(-1);
+  if (!latest) { if (amount > 0) list.push({ from: '0000-01', setIn: cm, amount, currency }); }
+  else if (latest.setIn === cm) Object.assign(latest, { amount, currency });   // corrección en el mismo mes
+  else list.push({ from: cm, setIn: cm, amount, currency });                     // cambio de sueldo desde este mes
+  save();
+}
+
 // ---------- Gastos fijos (se registran solos cada mes) ----------
 function generateRecurring() {
   const cur = currentMonth();
@@ -179,7 +206,8 @@ function viewSummary() {
   const prevTotal = totalOf(expensesOf(prevMonth));
   const isCurrent = viewMonth === currentMonth();
   const daysElapsed = isCurrent ? new Date().getDate() : daysInMonth(viewMonth);
-  const budget = state.settings.monthlyBudget;
+  const budget = budgetFor(viewMonth);
+  const bLabel = state.settings.budgetMode === 'percent' ? ` (${state.settings.budgetPercent}% de tus ingresos)` : '';
   let html = '';
 
   // Recordatorio de respaldo
@@ -204,7 +232,7 @@ function viewSummary() {
       perDay = ` · ~${fmt(left / remainingDays)} por día`;
     }
     budgetHtml = `<div class="progress ${pctClass(pct)}"><div style="width:${Math.min(pct, 100)}%"></div></div>
-      <div class="muted small">${left >= 0 ? `Te quedan <b>${fmt(left)}</b> de ${fmt(budget)}${perDay}` : `Te pasaste <b>${fmt(-left)}</b> del presupuesto de ${fmt(budget)}`}</div>`;
+      <div class="muted small">${left >= 0 ? `Te quedan <b>${fmt(left)}</b> de ${fmt(budget)}${bLabel}${perDay}` : `Te pasaste <b>${fmt(-left)}</b> del presupuesto de ${fmt(budget)}${bLabel}`}</div>`;
   }
 
   const maxExp = list.reduce((m, e) => Math.max(m, toMain(e.amount, e.currency)), 0);
@@ -218,6 +246,8 @@ function viewSummary() {
       <div><b>${fmt(maxExp)}</b><span>gasto mayor</span></div>
     </div>
   </section>`;
+
+  html += incomeCard(viewMonth, total);
 
   if (!list.length) {
     html += `<section class="card empty">Aún no hay gastos en ${monthName(viewMonth, { month: 'long' })}.<br>
@@ -242,6 +272,37 @@ function viewSummary() {
 
   html += trendCard();
   return html;
+}
+
+function incomeCard(mk, spent) {
+  const salary = salaryFor(mk);
+  const extras = incomesOf(mk).sort((a, b) => a.date.localeCompare(b.date));
+  const income = salary + totalOf(extras);
+  let body = '';
+  if (salary > 0) body += `<div class="kv"><span>💼 Sueldo</span><b>${fmt(salary)}</b></div>`;
+  body += extras.map(i => `<button class="kv income-row" data-action="edit-income" data-id="${i.id}">
+      <span>💰 ${esc(i.note || 'Ingreso extra')} <small class="muted">${Number(i.date.slice(8))}/${Number(i.date.slice(5, 7))}</small></span>
+      <b>${fmt(i.amount, i.currency)}</b></button>`).join('');
+  if (income > 0) {
+    const pct = spent / income * 100;
+    const saved = income - spent;
+    const target = state.settings.budgetMode === 'percent' && state.settings.budgetPercent > 0 ? state.settings.budgetPercent : null;
+    body += `<div class="kv total"><span>Total ingresos</span><b>${fmt(income)}</b></div>
+      <div class="split ${pctClass(target ? pct / target * 100 : pct)}">
+        <div class="spent" style="width:${Math.min(pct, 100)}%"></div>
+        ${target ? `<div class="marker" style="left:${Math.min(target, 100)}%" title="Meta: ${target}%"></div>` : ''}
+      </div>
+      <div class="split-legend">
+        <span>Gastaste <b>${pct.toFixed(1)}%</b> de tus ingresos${target ? ` · meta ${target}%` : ''}</span>
+        <span class="${saved >= 0 ? 'pos' : 'neg'}">${saved >= 0 ? `Ahorro: <b>${fmt(saved)}</b> (${(100 - pct).toFixed(1)}%)` : `Gastaste <b>${fmt(-saved)}</b> más de lo que ingresó`}</span>
+      </div>`;
+  } else {
+    body += `<p class="muted small" style="margin-top:0">Registra tu sueldo para ver qué porcentaje de tus ingresos gastas y cuánto ahorras.</p>
+      <button class="btn block" data-action="goto-settings">💼 Configurar sueldo</button>`;
+  }
+  return `<section class="card"><h3>Ingresos vs gastos</h3>${body}
+    <button class="btn block" data-action="add-income">＋ Añadir ingreso extra</button>
+    <p class="muted small center" style="margin-bottom:0">Gratificación, bonos, freelance, ventas…</p></section>`;
 }
 
 function catRow(cat, value, total, id) {
@@ -368,6 +429,8 @@ function viewSettings() {
   const s = state.settings;
   const lb = s.lastBackup ? new Date(s.lastBackup).toLocaleDateString('es-PE', { day: 'numeric', month: 'long', year: 'numeric' }) : 'nunca';
   const rec = state.recurring;
+  const sal = salaryEntryFor(currentMonth());
+  const salCur = sal?.currency || s.currency;
   return `<section class="card">
     <h3>Moneda principal</h3>
     <div class="seg">${Object.entries(CURRENCIES).map(([k, v]) => `<button class="${s.currency === k ? 'on' : ''}" data-action="set-currency" data-cur="${k}">${v}</button>`).join('')}</div>
@@ -379,10 +442,31 @@ function viewSettings() {
   </section>
 
   <section class="card">
+    <h3>Sueldo mensual 💼</h3>
+    <div class="amount-row">
+      <div class="seg">${Object.keys(CURRENCIES).map(k => `<button class="${salCur === k ? 'on' : ''}" data-action="salary-cur" data-cur="${k}">${k === 'PEN' ? 'S/' : 'US$'}</button>`).join('')}</div>
+      <input id="salary" type="text" inputmode="decimal" placeholder="0.00" value="${sal?.amount || ''}" style="font-size:26px">
+    </div>
+    <p class="muted small" style="margin-top:-4px">Pon tu sueldo neto (lo que recibes). Si cambia, el nuevo monto se aplica desde ${monthName(currentMonth(), { month: 'long' })} y los meses anteriores conservan el sueldo que tenían. Los ingresos extra se añaden desde el Resumen de cada mes.</p>
+  </section>
+
+  <section class="card">
     <h3>Presupuesto mensual</h3>
-    <label class="field">Monto total (${s.currency === 'PEN' ? 'S/' : 'US$'})
-      <input id="monthlyBudget" type="text" inputmode="decimal" value="${s.monthlyBudget || ''}" placeholder="0 = sin presupuesto">
-    </label>
+    <div class="seg" style="margin-bottom:12px">
+      <button class="${s.budgetMode !== 'percent' ? 'on' : ''}" data-action="budget-mode" data-mode="fixed">Monto fijo</button>
+      <button class="${s.budgetMode === 'percent' ? 'on' : ''}" data-action="budget-mode" data-mode="percent">% de ingresos</button>
+    </div>
+    ${s.budgetMode === 'percent' ? `
+      <label class="field">Porcentaje máximo de tus ingresos para gastar
+        <input id="budgetPercent" type="text" inputmode="decimal" value="${s.budgetPercent || ''}" placeholder="Ej. 70">
+      </label>
+      <p class="muted small" style="margin-top:-6px">${s.budgetPercent > 0 && incomeTotal(currentMonth()) > 0
+        ? `Este mes: ${s.budgetPercent}% de ${fmt(incomeTotal(currentMonth()))} = <b>${fmt(budgetFor(currentMonth()))}</b> para gastar y <b>${fmt(incomeTotal(currentMonth()) - budgetFor(currentMonth()))}</b> de ahorro.`
+        : 'Ej. 70% significa gastar como máximo el 70% y ahorrar el 30%. Se calcula con el sueldo más los ingresos extra de cada mes.'}</p>`
+    : `
+      <label class="field">Monto total (${s.currency === 'PEN' ? 'S/' : 'US$'})
+        <input id="monthlyBudget" type="text" inputmode="decimal" value="${s.monthlyBudget || ''}" placeholder="0 = sin presupuesto">
+      </label>`}
     <p class="muted small" style="margin-top:-6px">Los presupuestos de cada categoría se configuran en la pestaña Categorías.</p>
   </section>
 
@@ -543,6 +627,44 @@ function openExpenseForm({ mode = 'expense', item = null } = {}) {
   if (!item) setTimeout(() => $('#fAmount')?.focus(), 250);
 }
 
+// ----- Ingreso extra -----
+function openIncomeForm(item = null) {
+  let cur = item?.currency || mainCur();
+  const defDate = viewMonth === currentMonth() ? todayISO() : `${viewMonth}-01`;
+  openSheet(`<form autocomplete="off">
+    <div class="sheet-head"><h3>${item ? 'Editar ingreso' : 'Ingreso extra'}</h3><button type="button" data-close>Cancelar</button></div>
+    <div class="amount-row">
+      <div class="seg" id="iCur">${Object.keys(CURRENCIES).map(k => `<button type="button" data-cur="${k}" class="${k === cur ? 'on' : ''}">${k === 'PEN' ? 'S/' : 'US$'}</button>`).join('')}</div>
+      <input id="iAmount" type="text" inputmode="decimal" placeholder="0.00" value="${item?.amount ?? ''}" required>
+    </div>
+    <label class="field">Concepto<input id="iNote" type="text" maxlength="60" placeholder="Ej. Gratificación, bono, freelance" value="${esc(item?.note || '')}"></label>
+    <label class="field">Fecha<input id="iDate" type="date" value="${item?.date || defDate}"></label>
+    <p class="muted small" style="margin-top:-4px">El sueldo mensual no va aquí: se configura una sola vez en Ajustes.</p>
+    <div class="sheet-actions">
+      <button type="submit" class="btn primary">Guardar</button>
+      ${item ? '<button type="button" class="btn danger" id="iDelete">Eliminar ingreso</button>' : ''}
+    </div>
+  </form>`, () => {
+    const amount = parseAmount($('#iAmount').value);
+    if (!(amount > 0)) { toast('Ingresa un monto válido'); return; }
+    const data = { amount, currency: cur, note: $('#iNote').value.trim(), date: $('#iDate').value || todayISO() };
+    if (item) Object.assign(item, data); else state.incomes.push({ id: uid(), createdAt: Date.now(), ...data });
+    viewMonth = monthOf(data.date);
+    save(); closeSheet(); render(); toast('Ingreso guardado 💰');
+  });
+  const sheet = sheetEl.querySelector('.sheet');
+  sheet.querySelector('#iCur').addEventListener('click', e => {
+    const b = e.target.closest('[data-cur]'); if (!b) return;
+    cur = b.dataset.cur; sheet.querySelectorAll('#iCur button').forEach(x => x.classList.toggle('on', x === b));
+  });
+  sheet.querySelector('#iDelete')?.addEventListener('click', () => {
+    if (!confirm('¿Eliminar este ingreso?')) return;
+    state.incomes = state.incomes.filter(i => i !== item);
+    save(); closeSheet(); render(); toast('Ingreso eliminado');
+  });
+  if (!item) setTimeout(() => $('#iAmount')?.focus(), 250);
+}
+
 // ----- Categoría -----
 function openCategoryForm(id) {
   const item = id ? state.categories.find(c => c.id === id) : null;
@@ -677,6 +799,16 @@ $('#view').addEventListener('click', ev => {
       save(); render(); toast(r.active ? 'Gasto fijo activado' : 'Gasto fijo pausado');
       break;
     }
+    case 'add-income': openIncomeForm(); break;
+    case 'edit-income': openIncomeForm(state.incomes.find(i => i.id === id)); break;
+    case 'goto-settings': tab = 'ajustes'; render(); window.scrollTo(0, 0); break;
+    case 'budget-mode': state.settings.budgetMode = b.dataset.mode; save(); render(); break;
+    case 'salary-cur': {
+      const amt = parseAmount($('#salary').value);
+      if (amt > 0) { setSalary(amt, b.dataset.cur); render(); toast('Moneda del sueldo actualizada'); }
+      else { b.parentElement.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); }
+      break;
+    }
     case 'export-month': shareOrDownload(`gastos-${viewMonth}.csv`, csvFor(expensesOf(viewMonth)), 'text/csv'); break;
     case 'export-all': shareOrDownload(`gastos-completo-${todayISO()}.csv`, csvFor(state.expenses), 'text/csv'); break;
     case 'backup': doBackup(); break;
@@ -698,6 +830,15 @@ $('#view').addEventListener('change', ev => {
   if (t.id === 'rate') {
     const v = parseAmount(t.value);
     if (v > 0) { state.settings.rate = v; save(); toast('Tipo de cambio actualizado'); } else { t.value = state.settings.rate; toast('Tipo de cambio inválido'); }
+  }
+  if (t.id === 'salary') {
+    const v = parseAmount(t.value);
+    const cur = t.parentElement.querySelector('.seg .on')?.dataset.cur || mainCur();
+    setSalary(v > 0 ? v : 0, cur); render(); toast(v > 0 ? 'Sueldo guardado 💼' : 'Sueldo eliminado');
+  }
+  if (t.id === 'budgetPercent') {
+    const v = parseAmount(t.value);
+    state.settings.budgetPercent = v > 0 ? Math.min(v, 100) : 0; save(); render(); toast('Meta de gasto actualizada');
   }
   if (t.id === 'monthlyBudget') {
     const v = parseAmount(t.value);

@@ -202,3 +202,15 @@ main { padding: 4px 14px 12px; max-width: 640px; margin: 0 auto; }
   transition: opacity .2s, transform .2s; white-space: nowrap;
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---------- Ingresos vs gastos ---------- */
+.income-row { width: 100%; text-align: left; }
+.kv.total { font-weight: 600; }
+.split { position: relative; height: 14px; border-radius: 999px; background: var(--ok); margin: 12px 0 8px; overflow: visible; }
+.split .spent { height: 100%; border-radius: 999px 0 0 999px; background: var(--accent); }
+.split.warn .spent { background: var(--warn); }
+.split.over .spent { background: var(--danger); border-radius: 999px; }
+.split .marker { position: absolute; top: -4px; bottom: -4px; width: 3px; margin-left: -1.5px; background: var(--text); border-radius: 2px; }
+.split-legend { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--muted); }
+.split-legend .pos b { color: var(--ok); }
+.split-legend .neg b { color: var(--danger); }
